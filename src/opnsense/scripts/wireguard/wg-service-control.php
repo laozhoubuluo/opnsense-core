@@ -64,10 +64,12 @@ function get_vhid_status()
  */
 function wg_start($server, $fhandle, $ifcfgflag = 'up', $reload = false)
 {
+    $recreated = false;
     if (!does_interface_exist($server->interface)) {
         mwexecf('/sbin/ifconfig wg create name %s', [$server->interface]);
         mwexecf('/sbin/ifconfig %s group wireguard', [$server->interface]);
         $reload = true;
+        $recreated = true;
     }
 
     mwexecf('/usr/bin/wg syncconf %s %s', [$server->interface, $server->cnfFilename]);
@@ -147,6 +149,8 @@ function wg_start($server, $fhandle, $ifcfgflag = 'up', $reload = false)
     fwrite($fhandle, @md5_file($server->cnfFilename) . "|" . wg_reconfigure_hash($server));
 
     syslog(LOG_NOTICE, "wireguard instance {$server->name} ({$server->interface}) started");
+
+    return $recreated;
 }
 
 /**
@@ -218,6 +222,7 @@ if (isset($opts['h']) || empty($args) || !in_array($args[0], ['start', 'stop', '
     $action = $args[0];
 
     $server_devs = [];
+    $recreated = false;
     if (!(new OPNsense\Wireguard\General())->enabled->isEmpty()) {
         $vhids = get_vhid_status();
         foreach ((new OPNsense\Wireguard\Server())->servers->server->iterateItems() as $key => $node) {
@@ -248,11 +253,15 @@ if (isset($opts['h']) || empty($args) || !in_array($args[0], ['start', 'stop', '
                         wg_stop($node);
                         break;
                     case 'start':
-                        wg_start($node, $statHandle, $carp_if_flag);
+                        if (wg_start($node, $statHandle, $carp_if_flag)) {
+                            $recreated = true;
+                        }
                         break;
                     case 'restart':
                         wg_stop($node);
-                        wg_start($node, $statHandle, $carp_if_flag);
+                        if (wg_start($node, $statHandle, $carp_if_flag)) {
+                            $recreated = true;
+                        }
                         break;
                     case 'configure':
                         $ifstatus = '-';
@@ -299,7 +308,9 @@ if (isset($opts['h']) || empty($args) || !in_array($args[0], ['start', 'stop', '
                                 $reload = true;
                             }
 
-                            wg_start($node, $statHandle, $carp_if_flag, $reload);
+                            if (wg_start($node, $statHandle, $carp_if_flag, $reload)) {
+                                $recreated = true;
+                            }
                         /* when triggered via a CARP event, check our interface status [UP|DOWN] */
                         } elseif ($ifstatus != $carp_if_flag) {
                             syslog(
@@ -333,8 +344,8 @@ if (isset($opts['h']) || empty($args) || !in_array($args[0], ['start', 'stop', '
         }
     }
 
-    if (count($server_devs) && $action == 'restart') {
-        /* XXX required for filter/NAT rules, as interface was recreated, rules might not match anymore */
+    if (count($server_devs) && ($action == 'restart' || $recreated)) {
+        /* XXX required for filter/NAT rules and interface groups, as interface was recreated, rules might not match anymore */
         configd_run('filter reload');
     }
 }
